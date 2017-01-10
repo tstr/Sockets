@@ -7,6 +7,8 @@
 #include <memory>
 #include "netaddr.h"
 
+typedef size_t ClientId;
+
 class NetworkServer
 {
 private:
@@ -17,7 +19,7 @@ private:
 protected:
 
 	//Events
-	virtual void onRecieve(const void* data, size_t dataSize) = 0;
+	virtual void onRecieve(ClientId id, const void* data, size_t dataSize) = 0;
 
 public:
 
@@ -25,5 +27,6 @@ public:
 	NetworkServer(NetAddress::PortStr port);
 	~NetworkServer();
 
-	virtual void send(const void* data, size_t dataSize);
+	bool send(ClientId id, const void* data, size_t dataSize);
+	bool sendAll(const void* data, size_t dataSize);
 };

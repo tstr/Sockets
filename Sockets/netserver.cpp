@@ -8,23 +8,34 @@
 #include "netclient.h"
 #include "netserver.h"
 
+#include <functional>
+
 using namespace std;
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //	Server implementation
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+#define MAX_CLIENT_CONTEXTS 8
+
+struct ClientContext
+{
+	SOCKET clientSocket = INVALID_SOCKET;
+	thread clientThread;
+	char recieveBuffer[RECV_BUFFER_SIZE] = {0};
+};
+
 struct NetworkServer::Impl
 {
 	NetworkServer* m_server = nullptr;
 
 	SOCKET m_listenSocket = INVALID_SOCKET;
-	SOCKET m_acceptSocket = INVALID_SOCKET;
-	bool m_success = false;
-	bool m_recieving = true;
+	thread m_listenThread;
 
-	thread m_recieveThread;
-	char m_recieveBuffer[RECV_BUFFER_SIZE];
+	ClientContext m_clients[MAX_CLIENT_CONTEXTS];
+	ClientId m_clientIdCounter = 0;
+
+	bool m_success = false;
 
 	////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 	//Initialize server listening socket on a specific port
@@ -73,34 +84,48 @@ struct NetworkServer::Impl
 	}
 
 	//Wait for client connections
-	bool serverAccept()
+	bool serverListen()
 	{
 		//Stores information about the client address
 		sockaddr_in clientAddr;
 		int clientAddrLen = sizeof(clientAddr);
 		ZeroMemory(&clientAddr, clientAddrLen);
 
-		//Wait for a client connection - creates a new client socket
-		m_acceptSocket = accept(m_listenSocket, (sockaddr*)&clientAddr, &clientAddrLen);
-
-		printserver("connections found.");
-
-		if (m_acceptSocket == INVALID_SOCKET)
+		while (true)
 		{
-			printserver("accept failed with error: %d", WSAGetLastError());
-			return false;
-		}
+			//Wait for a client connection - creates a new client socket
+			SOCKET s = accept(m_listenSocket, (sockaddr*)&clientAddr, &clientAddrLen);
 
-		//Get address name of client connection as a string
-		const int clientAddrBufferSize = 1024;
-		char clientAddrBuffer[clientAddrBufferSize];
-		ZeroMemory(clientAddrBuffer, clientAddrBufferSize);
-		if (getnameinfo((const SOCKADDR*)&clientAddr, clientAddrLen, clientAddrBuffer, clientAddrBufferSize, nullptr, 0, NI_NUMERICHOST))//NI_NOFQDN  NI_NUMERICHOST
-		{
-			printserver("unable to resolve client address string");
-		}
+			const ClientId id = m_clientIdCounter;
+			m_clientIdCounter++;
 
-		printserver("connection accepted (%s)", clientAddrBuffer);
+			printserver("connections found.");
+
+			if (s == INVALID_SOCKET)
+			{
+				printserver("accept failed with error: %d", WSAGetLastError());
+				return false;
+			}
+
+			m_clients[id].clientSocket = s;
+
+			//Get address name of client connection as a string
+			const int clientAddrBufferSize = 1024;
+			char clientAddrBuffer[clientAddrBufferSize];
+			ZeroMemory(clientAddrBuffer, clientAddrBufferSize);
+			if (getnameinfo((const SOCKADDR*)&clientAddr, clientAddrLen, clientAddrBuffer, clientAddrBufferSize, nullptr, 0, NI_NUMERICHOST))//NI_NOFQDN  NI_NUMERICHOST
+			{
+				printserver("unable to resolve client address string");
+			}
+
+			printserver("connection accepted (%s)", clientAddrBuffer);
+			
+			//Handle incoming data on separate thread
+			m_clients[id].clientThread = thread([this, id] {
+				this->serverRecieve(id);
+			});
+			m_clients[id].clientThread.detach();
+		}
 
 		return true;
 	}
@@ -121,46 +146,45 @@ struct NetworkServer::Impl
 			printserver("listener socket closed successfully");
 		}
 
-		//Close client accept socket
-		if (m_acceptSocket == INVALID_SOCKET)
+		for (int i = 0; i < MAX_CLIENT_CONTEXTS; i++)
 		{
-			printserver("client socket already closed");
-		}
-		else
-		{
-			if (shutdown(m_acceptSocket, SD_BOTH) == SOCKET_ERROR)
+			//Close client accept socket
+			if (m_clients[i].clientSocket == INVALID_SOCKET)
 			{
-				printserver("shutdown failed: %d", WSAGetLastError());
-				closesocket(m_acceptSocket);
-				return false;
+				printserver("(%d) client socket already closed", i);
 			}
+			else
+			{
+				if (shutdown(m_clients[i].clientSocket, SD_BOTH) == SOCKET_ERROR)
+				{
+					printserver("shutdown failed: %d", WSAGetLastError());
+					closesocket(m_clients[i].clientSocket);
+					return false;
+				}
 
-			closesocket(m_acceptSocket);
-			m_acceptSocket = INVALID_SOCKET;
+				closesocket(m_clients[i].clientSocket);
+				m_clients[i].clientSocket = INVALID_SOCKET;
 
-			printserver("client socket closed successfully");
+				printserver("(%d) client socket closed successfully", i);
+			}
 		}
-
 
 		return true;
 	}
 
 	////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 	//Send/recieve methods
-	void serverRecieve()
+	void serverRecieve(ClientId id)
 	{
-		//Wait until a client connection is accepted
-		serverAccept();
-
 		int recieveResult = 0;
 		// Receive data until the client connection is closed
 		do
 		{
-			recieveResult = recv(m_acceptSocket, m_recieveBuffer, RECV_BUFFER_SIZE, 0);
+			recieveResult = recv(m_clients[id].clientSocket, m_clients[id].recieveBuffer, RECV_BUFFER_SIZE, 0);
 
 			if (recieveResult > 0)
 			{
-				m_server->onRecieve(m_recieveBuffer, recieveResult);
+				m_server->onRecieve(id, m_clients[id].recieveBuffer, recieveResult);
 			}
 			else if (recieveResult < 0)
 			{
@@ -170,13 +194,20 @@ struct NetworkServer::Impl
 		} while ((recieveResult > 0));
 	}
 
-	void serverSend(const void* data, size_t dataSize)
+	bool serverSend(ClientId id, const void* data, size_t dataSize)
 	{
-		if (::send(m_acceptSocket, (const char*)data, (int)dataSize, 0) == SOCKET_ERROR)
+		if (::send(m_clients[id].clientSocket, (const char*)data, (int)dataSize, 0) == SOCKET_ERROR)
 		{
-			printclient("send failed: %d", WSAGetLastError());
-			closesocket(m_acceptSocket);
-			m_success = false;
+			if (m_clients[id].clientSocket == INVALID_SOCKET)
+			{
+				return false;
+			}
+			else
+			{
+				printserver("(id:%d) send failed: %d", id, WSAGetLastError());
+				closesocket(m_clients[id].clientSocket);
+				return true;
+			}
 		}
 	}
 
@@ -189,9 +220,12 @@ struct NetworkServer::Impl
 
 		m_success = serverInit(port.c_str());
 
-		m_recieveThread = thread([this]() {
-			this->serverRecieve();
+		//Wait until a client connection is accepted
+		m_listenThread = thread([this]() {
+			this->serverListen();
 		});
+
+		m_listenThread.detach();
 	}
 
 	~Impl()
@@ -212,9 +246,20 @@ NetworkServer::NetworkServer(NetAddress::PortStr port) :
 NetworkServer::~NetworkServer()
 {}
 
-void NetworkServer::send(const void* data, size_t dataSize)
+bool NetworkServer::sendAll(const void* data, size_t dataSize)
 {
-	pImpl->serverSend(data, dataSize);
+	for (int i = 0; i < MAX_CLIENT_CONTEXTS; i++)
+	{
+		pImpl->serverSend(i, data, dataSize);
+	}
+
+	return true;
 }
+
+bool NetworkServer::send(ClientId id, const void* data, size_t dataSize)
+{
+	return pImpl->serverSend(id, data, dataSize);
+}
+
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////

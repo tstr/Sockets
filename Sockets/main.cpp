@@ -11,53 +11,41 @@
 #include "cmdargs.h"
 
 #include <Windows.h>
+#include <consoleapi.h>
 
 using namespace std;
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-// Client/Server classes
+// Client/Server message classes
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-class Server : public NetworkServer
+class MessageServer : public NetworkServer
 {
-private:
-
-	string m_username;
-
 public:
 
-	Server(const NetAddress::PortStr& port) :
+	MessageServer(const NetAddress::PortStr& port) :
 		NetworkServer(port)
-	{
-		DWORD bufsz = 256;
-		char buf[256] = { 0 };
-		GetUserNameA(buf, &bufsz);
-		m_username = buf;
-	}
+	{}
 
-	void onRecieve(const void* data, size_t dataSize) override
+	//When a message is recieved from a client, echo it back to all connected clients
+	void onRecieve(ClientId id, const void* data, size_t dataSize) override
 	{
 		cout.write((const char*)data, dataSize);
 		cout << "\n";
+		this->sendAll(data, dataSize);
 	}
 
 	void run()
 	{
 		string buf;
-		while (true)
+		do
 		{
 			getline(cin, buf);
-			
-			if (!buf.empty())
-			{
-				buf = "[" + m_username + "]: " + buf;
-				this->send(buf.c_str(), buf.size());
-			}
-		}
+		} while (buf != "#exit");
 	}
 };
 
-class Client : public NetworkClient
+class MessageClient : public NetworkClient
 {
 private:
 
@@ -65,7 +53,7 @@ private:
 
 public:
 
-	Client(const NetAddress& addr) :
+	MessageClient(const NetAddress& addr) :
 		NetworkClient(addr)
 	{
 		DWORD bufsz = 256;
@@ -78,11 +66,14 @@ public:
 	{
 
 	}
-
+	
+	//Print message when it is recieved from server
 	void onRecieve(const void* data, size_t dataSize) override
 	{
+		SetConsoleTextAttribute(GetStdHandle(STD_OUTPUT_HANDLE), FOREGROUND_GREEN);
 		cout.write((const char*)data, dataSize);
 		cout << "\n";
+		SetConsoleTextAttribute(GetStdHandle(STD_OUTPUT_HANDLE), FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE);
 	}
 
 	void run()
@@ -91,8 +82,17 @@ public:
 		while (true)
 		{
 			getline(cin, buf);
-			buf = "[" + m_username + "]: " + buf;
-			this->send(buf.c_str(), buf.size());
+
+			if (!buf.empty())
+			{
+				if (buf == "#exit")
+				{
+					break;
+				}
+
+				buf = "[" + m_username + "]: " + buf;
+				this->send(buf.c_str(), buf.size()); //dispatch to server
+			}
 		}
 	}
 };
@@ -123,12 +123,12 @@ int main(int argc, char** argv)
 
 	if (isServer && !isClient)
 	{
-		Server server(addr.getPort());
+		MessageServer server(addr.getPort());
 		server.run();
 	}
 	else if (isClient && !isServer)
 	{
-		Client client(addr);
+		MessageClient client(addr);
 		client.run();
 	}
 	else

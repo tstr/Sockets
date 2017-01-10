@@ -103,7 +103,7 @@ struct NetworkClient::Impl
 	//Disconnect a client from the server
 	bool clientDisconnect()
 	{
-		m_client->onClose();
+		//m_client->onClose();
 
 		// shutdown the send half of the connection since no more data will be sent
 		if (shutdown(m_clientSocket, SD_BOTH) == SOCKET_ERROR)
@@ -114,6 +114,8 @@ struct NetworkClient::Impl
 		}
 
 		closesocket(m_clientSocket);
+		m_clientSocket = INVALID_SOCKET;
+
 		printclient("connection closed successfully");
 
 		return true;
@@ -166,12 +168,12 @@ struct NetworkClient::Impl
 		m_recieveThread = thread([this]() {
 			this->clientRecieve();
 		});
+		m_recieveThread.detach();
 	}
 
 	~Impl()
 	{
 		m_success = clientDisconnect();
-		m_recieveThread.join();
 	}
 
 	////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////

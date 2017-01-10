@@ -9,3 +9,4 @@ REM set addr=137.44.219.127
 start cmd /c "title server && x64\release\sockets.exe --server --port %port% & pause"
 timeout /t 3
 start cmd /c "title client && x64\release\sockets.exe --client --address %addr% --port %port% & pause"
+start cmd /c "title client && x64\release\sockets.exe --client --address %addr% --port %port% & pause"
