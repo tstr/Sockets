@@ -5,7 +5,7 @@
 #pragma once
 
 #include <memory>
-#include "netcommon.h"
+#include "netaddr.h"
 
 class NetworkServer
 {
@@ -14,8 +14,16 @@ private:
 	struct Impl;
 	std::unique_ptr<Impl> pImpl;
 
+protected:
+
+	//Events
+	virtual void onRecieve(const void* data, size_t dataSize) = 0;
+
 public:
 
-	NetworkServer(const SNetAddress& address);
+	NetworkServer() = delete;
+	NetworkServer(NetAddress::PortStr port);
 	~NetworkServer();
+
+	virtual void send(const void* data, size_t dataSize);
 };

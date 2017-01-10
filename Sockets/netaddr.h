@@ -6,7 +6,7 @@
 
 #include <string>
 
-class SNetAddress
+class NetAddress
 {
 private:
 
@@ -19,33 +19,33 @@ private:
 
 public:
 
-	typedef const char* PortStr;
-	typedef const char* AddrStr;
+	typedef std::string PortStr;
+	typedef std::string AddrStr;
 
-	SNetAddress()
+	NetAddress()
 	{
 		//Zeroe out struct
-		memset(this, 0, sizeof(SNetAddress));
+		memset(this, 0, sizeof(NetAddress));
 	}
 
-	SNetAddress(PortStr port, AddrStr address = nullptr) :
-		SNetAddress::SNetAddress()
+	NetAddress(PortStr port, AddrStr address) :
+		NetAddress::NetAddress()
 	{
-		strcpy_s(m_port, port);
+		strcpy_s(m_port, port.c_str());
 	
-		if (address)
-			strcpy_s(m_addr, address);
+		if (address.size() > 0)
+			strcpy_s(m_addr, address.c_str());
 	}
 
 	PortStr getPort() const { return m_port; }
-	AddrStr getAddress() const { return (m_port[0] == 0) ? nullptr : m_port; }
+	AddrStr getAddress() const { return (m_addr[0] == 0) ? nullptr : m_addr; }
 
-	void getPort(std::string& port) const
+	void getPort(PortStr& port) const
 	{
 		port = m_port;
 	}
 	
-	void getAddress(std::string& addr) const
+	void getAddress(AddrStr& addr) const
 	{
 		if (m_port[0] == 0)
 		{

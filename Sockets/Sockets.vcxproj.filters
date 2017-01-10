@@ -27,7 +27,13 @@
     <ClCompile Include="cmdargs.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="network.cpp">
+    <ClCompile Include="netclient.cpp">
+      <Filter>Source Files\net</Filter>
+    </ClCompile>
+    <ClCompile Include="netserver.cpp">
+      <Filter>Source Files\net</Filter>
+    </ClCompile>
+    <ClCompile Include="winsock.cpp">
       <Filter>Source Files\net</Filter>
     </ClCompile>
   </ItemGroup>
@@ -50,8 +56,11 @@
     <ClInclude Include="netaddr.h">
       <Filter>Header Files\net</Filter>
     </ClInclude>
-    <ClInclude Include="netcommon.h">
-      <Filter>Header Files\net</Filter>
+    <ClInclude Include="winsock.h">
+      <Filter>Source Files\net</Filter>
+    </ClInclude>
+    <ClInclude Include="common.h">
+      <Filter>Source Files\net</Filter>
     </ClInclude>
   </ItemGroup>
 </Project>
