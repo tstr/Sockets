@@ -75,7 +75,7 @@ struct NetworkClient::Impl
 				if (addressInfo->ai_next == nullptr)
 				{
 					printclient("no more connections");
-					break;
+					return false;
 				}
 			}
 			else
@@ -103,8 +103,6 @@ struct NetworkClient::Impl
 	//Disconnect a client from the server
 	bool clientDisconnect()
 	{
-		//m_client->onClose();
-
 		// shutdown the send half of the connection since no more data will be sent
 		if (shutdown(m_clientSocket, SD_BOTH) == SOCKET_ERROR)
 		{
@@ -137,7 +135,7 @@ struct NetworkClient::Impl
 			}
 			else if (recieveResult < 0)
 			{
-				m_success = false;
+				printclient("recieving failed: %d", WSAGetLastError());
 			}
 
 		} while ((recieveResult > 0));
@@ -165,6 +163,12 @@ struct NetworkClient::Impl
 			address.getPort().c_str()
 		);
 
+		//todo: fix assertion failure
+		//m_client->onConnect();
+
+		if (!m_success)
+			return;
+
 		m_recieveThread = thread([this]() {
 			this->clientRecieve();
 		});
@@ -173,11 +177,14 @@ struct NetworkClient::Impl
 
 	~Impl()
 	{
+		//m_client->onDisconnect();
 		m_success = clientDisconnect();
 	}
 
 	////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 };
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 NetworkClient::NetworkClient(const NetAddress& address) :
 	pImpl(new Impl(this, address))

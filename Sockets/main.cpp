@@ -35,12 +35,28 @@ public:
 		this->sendAll(data, dataSize);
 	}
 
+	void onConnect(ClientId id) override
+	{
+		//printf("(%p) client connected\n", id);
+	}
+	
+	void onDisconnect(ClientId id) override
+	{
+		//printf("(%p) client disconnected\n", id);
+	}
+
 	void run()
 	{
 		string buf;
 		do
 		{
 			getline(cin, buf);
+
+			if (buf == "#count")
+			{
+				cout << this->getClientCount() << endl;
+			}
+
 		} while (buf != "#exit");
 	}
 };
@@ -62,9 +78,14 @@ public:
 		m_username = buf;
 	}
 
-	void onClose() override
+	void onDisconnect() override
 	{
+		//cout << "Disconnected from server.\n";
+	}
 
+	void onConnect() override
+	{
+		//cout << "Connected to server.\n";
 	}
 	
 	//Print message when it is recieved from server

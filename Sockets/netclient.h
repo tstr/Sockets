@@ -18,8 +18,10 @@ private:
 	
 protected:
 	
+	//Event handlers
 	virtual void onRecieve(const void* data, size_t dataSize) = 0;	//Called when data is recieved from server
-	virtual void onClose() = 0;										//Called when client closes connection
+	virtual void onConnect() = 0;									//Called when client connects
+	virtual void onDisconnect() = 0;								//Called when client disconnects
 
 public:
 
@@ -27,5 +29,5 @@ public:
 	NetworkClient(const NetAddress& address);
 	~NetworkClient();
 
-	virtual void send(const void* data, size_t dataSize);
+	void send(const void* data, size_t dataSize);
 };

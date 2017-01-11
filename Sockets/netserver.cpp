@@ -9,31 +9,111 @@
 #include "netserver.h"
 
 #include <functional>
+#include <memory>
+#include <algorithm>
+#include <list>
+#include <mutex>
+#include <cassert>
 
 using namespace std;
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////
-//	Server implementation
+//	ClientContext class - class that represents a connected client
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-#define MAX_CLIENT_CONTEXTS 8
-
-struct ClientContext
+struct IClientListener
 {
-	SOCKET clientSocket = INVALID_SOCKET;
-	thread clientThread;
-	char recieveBuffer[RECV_BUFFER_SIZE] = {0};
+	virtual void onRecieve(ClientId id, const void* data, size_t dataSize) = 0;
+	virtual void onDisconnect(ClientId id) = 0;
+	virtual void onConnect(ClientId id) = 0;
 };
 
-struct NetworkServer::Impl
+class ClientContext
+{
+private:
+	
+	SOCKET m_socket = INVALID_SOCKET;
+	thread m_recieveThread;
+	char m_recieveBuffer[RECV_BUFFER_SIZE] = {0};
+	mutex m_recieveMutex;
+
+	IClientListener& m_listener;
+
+	void handleRecieve()
+	{
+		int recieveResult = 0;
+
+		m_listener.onConnect(getId());
+
+		// Receives data until the client connection is closed
+		do
+		{
+			recieveResult = recv(m_socket, m_recieveBuffer, RECV_BUFFER_SIZE, 0);
+
+			if (recieveResult > 0)
+			{
+				m_listener.onRecieve(getId(), m_recieveBuffer, recieveResult);
+			}
+			else if (recieveResult < 0)
+			{
+				printserver("(%p) error recieve result %d", getId(), recieveResult);
+			}
+
+		} while ((recieveResult > 0));
+
+		m_listener.onDisconnect(getId());
+	}
+
+public:
+	
+	ClientContext(IClientListener& listener, SOCKET sock) :
+		m_socket(sock),
+		m_listener(listener)
+	{
+		m_recieveThread = thread(&ClientContext::handleRecieve, this);
+		m_recieveThread.detach();
+	}
+
+	~ClientContext()
+	{
+		//lock_guard<mutex>lk(m_recieveMutex);
+
+		const ClientId id = getId();
+
+		if (shutdown(m_socket, SD_BOTH) == SOCKET_ERROR)
+		{
+			printserver("(%p) shutdown failed: %d", id, WSAGetLastError());
+		}
+
+		closesocket(m_socket);
+		printserver("(%p) client socket closed successfully", id);
+
+		m_socket = INVALID_SOCKET;
+	}
+	
+	ClientId getId() const
+	{
+		return (ClientId)m_socket;
+	}
+
+	SOCKET getSocket() const
+	{
+		return m_socket;
+	}
+};
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// NetworkServer private implementation
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+struct NetworkServer::Impl : public IClientListener
 {
 	NetworkServer* m_server = nullptr;
 
 	SOCKET m_listenSocket = INVALID_SOCKET;
 	thread m_listenThread;
 
-	ClientContext m_clients[MAX_CLIENT_CONTEXTS];
-	ClientId m_clientIdCounter = 0;
+	list<unique_ptr<ClientContext>> m_clients;
+	recursive_mutex m_clientsMutex;
 
 	bool m_success = false;
 
@@ -95,10 +175,7 @@ struct NetworkServer::Impl
 		{
 			//Wait for a client connection - creates a new client socket
 			SOCKET s = accept(m_listenSocket, (sockaddr*)&clientAddr, &clientAddrLen);
-
-			const ClientId id = m_clientIdCounter;
-			m_clientIdCounter++;
-
+			
 			printserver("connections found.");
 
 			if (s == INVALID_SOCKET)
@@ -106,8 +183,6 @@ struct NetworkServer::Impl
 				printserver("accept failed with error: %d", WSAGetLastError());
 				return false;
 			}
-
-			m_clients[id].clientSocket = s;
 
 			//Get address name of client connection as a string
 			const int clientAddrBufferSize = 1024;
@@ -119,12 +194,9 @@ struct NetworkServer::Impl
 			}
 
 			printserver("connection accepted (%s)", clientAddrBuffer);
-			
-			//Handle incoming data on separate thread
-			m_clients[id].clientThread = thread([this, id] {
-				this->serverRecieve(id);
-			});
-			m_clients[id].clientThread.detach();
+
+			lock_guard<recursive_mutex>lk(m_clientsMutex);
+			m_clients.push_back(unique_ptr<ClientContext>(new ClientContext(*this, s)));
 		}
 
 		return true;
@@ -133,84 +205,105 @@ struct NetworkServer::Impl
 	//Close all client connections
 	bool serverDeinit()
 	{
+		//Disconnect all clients
+		{
+			lock_guard<recursive_mutex>lk(m_clientsMutex);
+			m_clients.clear();
+		}
+
 		//Close server listening socket
-		if (m_listenSocket == INVALID_SOCKET)
-		{
-			printserver("listener socket already closed");
-		}
-		else
-		{
-			closesocket(m_listenSocket);
-			m_listenSocket = INVALID_SOCKET;
+		closesocket(m_listenSocket);
+		m_listenSocket = INVALID_SOCKET;
 			
-			printserver("listener socket closed successfully");
-		}
-
-		for (int i = 0; i < MAX_CLIENT_CONTEXTS; i++)
-		{
-			//Close client accept socket
-			if (m_clients[i].clientSocket == INVALID_SOCKET)
-			{
-				printserver("(%d) client socket already closed", i);
-			}
-			else
-			{
-				if (shutdown(m_clients[i].clientSocket, SD_BOTH) == SOCKET_ERROR)
-				{
-					printserver("shutdown failed: %d", WSAGetLastError());
-					closesocket(m_clients[i].clientSocket);
-					return false;
-				}
-
-				closesocket(m_clients[i].clientSocket);
-				m_clients[i].clientSocket = INVALID_SOCKET;
-
-				printserver("(%d) client socket closed successfully", i);
-			}
-		}
+		printserver("listener socket closed successfully");
 
 		return true;
 	}
 
 	////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-	//Send/recieve methods
-	void serverRecieve(ClientId id)
+	
+	//Find a client context with a given id
+	ClientContext* getClient(ClientId id)
 	{
-		int recieveResult = 0;
-		// Receive data until the client connection is closed
-		do
+		lock_guard<recursive_mutex>lk(m_clientsMutex);
+
+		typedef unique_ptr<ClientContext> c_t;
+		auto it = find_if(m_clients.begin(), m_clients.end(), [=](const c_t& c) { return c->getId() == id; });
+		
+		if (it == m_clients.end())
 		{
-			recieveResult = recv(m_clients[id].clientSocket, m_clients[id].recieveBuffer, RECV_BUFFER_SIZE, 0);
-
-			if (recieveResult > 0)
-			{
-				m_server->onRecieve(id, m_clients[id].recieveBuffer, recieveResult);
-			}
-			else if (recieveResult < 0)
-			{
-				m_success = false;
-			}
-
-		} while ((recieveResult > 0));
-	}
-
-	bool serverSend(ClientId id, const void* data, size_t dataSize)
-	{
-		if (::send(m_clients[id].clientSocket, (const char*)data, (int)dataSize, 0) == SOCKET_ERROR)
+			return nullptr;
+		}
+		else
 		{
-			if (m_clients[id].clientSocket == INVALID_SOCKET)
-			{
-				return false;
-			}
-			else
-			{
-				printserver("(id:%d) send failed: %d", id, WSAGetLastError());
-				closesocket(m_clients[id].clientSocket);
-				return true;
-			}
+			return it->get();
 		}
 	}
 
+	//Closes client socket and removes it from client list
+	void destroyClient(ClientId id)
+	{
+		lock_guard<recursive_mutex>lk(m_clientsMutex);
+
+		typedef unique_ptr<ClientContext> c_t;
+		auto it = find_if(m_clients.begin(), m_clients.end(), [=](const c_t& c) { return c->getId() == id; });
+		
+		if (it != m_clients.end())
+		{
+			it->reset();
+			m_clients.erase(it);
+		}
+	}
+
+	//Gets the Winsock socket handle of a client with a given id
+	SOCKET getClientSocket(ClientId id)
+	{
+		if (ClientContext* con = getClient(id))
+		{
+			return con->getSocket();
+		}
+
+		return INVALID_SOCKET;
+	}
+
+	////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+	//Send/recieve methods
+
+	bool serverSend(ClientId id, const void* data, size_t dataSize)
+	{
+		SOCKET sock = getClientSocket(id);
+
+		if (::send(sock, (const char*)data, (int)dataSize, 0) == SOCKET_ERROR)
+		{
+			printserver("(%p) send failed: %d", id, WSAGetLastError());
+			return false;
+		}
+		
+		return true;
+	}
+
+	////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+	// Event handlers
+	////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+	void onRecieve(ClientId id, const void* data, size_t dataSize) override
+	{
+		m_server->onRecieve(id, data, dataSize); //Pass event up to NetworkServer::onRecieve()
+	}
+
+	void onDisconnect(ClientId id) override
+	{
+		m_server->onDisconnect(id);
+		destroyClient(id); //remove client context from list when they disconnect
+	}
+
+	void onConnect(ClientId id) override
+	{
+		m_server->onConnect(id);
+	}
+
+	////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+	// Ctor/dtor
 	////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 	Impl(NetworkServer* server, const NetAddress::PortStr& port) :
@@ -238,6 +331,8 @@ struct NetworkServer::Impl
 };
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// NetworkServer interface
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 NetworkServer::NetworkServer(NetAddress::PortStr port) :
 	pImpl(new Impl(this, port))
@@ -248,9 +343,11 @@ NetworkServer::~NetworkServer()
 
 bool NetworkServer::sendAll(const void* data, size_t dataSize)
 {
-	for (int i = 0; i < MAX_CLIENT_CONTEXTS; i++)
+	lock_guard<recursive_mutex>lk(pImpl->m_clientsMutex);
+
+	for (auto& c : pImpl->m_clients)
 	{
-		pImpl->serverSend(i, data, dataSize);
+		pImpl->serverSend(c->getId(), data, dataSize);
 	}
 
 	return true;
@@ -261,5 +358,11 @@ bool NetworkServer::send(ClientId id, const void* data, size_t dataSize)
 	return pImpl->serverSend(id, data, dataSize);
 }
 
+
+int NetworkServer::getClientCount() const
+{
+	lock_guard<recursive_mutex>lk(pImpl->m_clientsMutex);
+	return (int)pImpl->m_clients.size();
+}
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////
